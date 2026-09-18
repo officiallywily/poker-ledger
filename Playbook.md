@@ -8,17 +8,20 @@ Stack: Next.js (`apps/web`) → Express (`apps/api`) → Prisma 7 → Supabase P
 
 ## 1. Architecture & Boundaries
 
-* **`apps/web` (Next.js):** Browser presentation layer and state listener. Never stores database credentials, session pooler URLs, or `SUPABASE_SERVICE_ROLE_KEY`. Subscribes to Supabase Realtime CDC channels over WebSockets for live table updates.
-* **`apps/api` (Express):** Authoritative business logic engine. Validates buy-ins, handles host administrative actions, enforces zero-sum constraints before session close, and executes database mutations via Prisma.
-* **Prisma 7:** Type-safe database client and migration manager. Migrations run through CLI using `prisma.config.ts` over direct connection; runtime pooling uses `@prisma/adapter-pg`.
-* **Supabase Postgres:** Managed database. Data API (PostgREST) is disabled for mutations—Express is the sole gatekeeper. Supabase Realtime CDC remains enabled on specific tables (`buy_ins`, `session_players`).
-* **Testing Layer:** Vitest throughout. Supertest drives HTTP integration tests in `apps/api`; React Testing Library (RTL) handles component rendering and interaction tests in `apps/web`.
+- `apps/web` **(Next.js):** Browser presentation layer and state listener. Never stores database credentials, session pooler URLs, or `SUPABASE_SERVICE_ROLE_KEY`. Subscribes to Supabase Realtime CDC channels over WebSockets for live table updates.
+- `apps/api` **(Express):** Authoritative business logic engine. Validates buy-ins, handles host administrative actions, enforces zero-sum constraints before session close, and executes database mutations via Prisma.
+- **Prisma 7:** Type-safe database client and migration manager. Migrations run through CLI using `prisma.config.ts` over direct connection; runtime pooling uses `@prisma/adapter-pg`.
+- **Supabase Postgres:** Managed database. Data API (PostgREST) is disabled for mutations—Express is the sole gatekeeper. Supabase Realtime CDC remains enabled on specific tables (`buy_ins`, `session_players`).
+- **Testing Layer:** Vitest throughout. Supertest drives HTTP integration tests in `apps/api`; React Testing Library (RTL) handles component rendering and interaction tests in `apps/web`.
 
 ---
+
+
 
 ## 2. Prerequisites & Root Workspace
 
 Ensure local machine tooling is installed:
+
 ```bash
 node -v          # >= 20.x LTS
 pnpm -v          # >= 9.x
@@ -26,7 +29,10 @@ git -v
 docker compose version
 ```
 
+
+
 ### Initialize Monorepo Root
+
 ```bash
 mkdir poker-ledger && cd poker-ledger
 git init
@@ -34,6 +40,7 @@ mkdir apps
 ```
 
 Create root `.gitignore`:
+
 ```text
 node_modules/
 .next/
@@ -48,12 +55,14 @@ coverage/
 ```
 
 Create root `pnpm-workspace.yaml`:
+
 ```yaml
 packages:
   - 'apps/*'
 ```
 
 Create root `package.json` to orchestrate multi-app workflows:
+
 ```json
 {
   "name": "poker-ledger-monorepo",
@@ -68,6 +77,7 @@ Create root `package.json` to orchestrate multi-app workflows:
 ```
 
 Commit base repository:
+
 ```bash
 git add .gitignore pnpm-workspace.yaml package.json
 git commit -m "Initialize monorepo workspace and gitignore"
@@ -75,9 +85,12 @@ git commit -m "Initialize monorepo workspace and gitignore"
 
 ---
 
+
+
 ## 3. Web Client Scaffold (`apps/web`)
 
 From repository root:
+
 ```bash
 cd apps
 pnpm create next-app@latest web --typescript --tailwind --eslint --app --src-dir --use-pnpm --disable-git
@@ -85,6 +98,7 @@ cd web
 ```
 
 Create `apps/web/.env.example`:
+
 ```bash
 NEXT_PUBLIC_API_URL=http://localhost:4000
 NEXT_PUBLIC_SUPABASE_URL=[https://your-ref.supabase.co](https://your-ref.supabase.co)
@@ -92,17 +106,20 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
 ```
 
 Copy for local execution:
+
 ```bash
 cp .env.example .env.local
 ```
 
 Verify build and runtime:
+
 ```bash
 pnpm dev
 # Inspect http://localhost:3000, then terminate (Ctrl+C)
 ```
 
 Commit:
+
 ```bash
 git add .
 git commit -m "Scaffold Next.js client in apps/web"
@@ -110,9 +127,12 @@ git commit -m "Scaffold Next.js client in apps/web"
 
 ---
 
+
+
 ## 4. API Scaffold (`apps/api`)
 
 From repository root:
+
 ```bash
 cd apps/api
 pnpm init
@@ -122,6 +142,7 @@ pnpm exec tsc --init
 ```
 
 Update `apps/api/package.json`:
+
 ```json
 {
   "name": "api",
@@ -137,7 +158,8 @@ Update `apps/api/package.json`:
 
 Split app definition from server listener to facilitate integration testing:
 
-**`apps/api/src/app.ts`**
+`apps/api/src/app.ts`
+
 ```typescript
 import "dotenv/config";
 import express from "express";
@@ -153,7 +175,8 @@ app.get("/health", (_req, res) => {
 });
 ```
 
-**`apps/api/src/server.ts`**
+`apps/api/src/server.ts`
+
 ```typescript
 import { app } from "./app.js";
 
@@ -165,29 +188,35 @@ app.listen(port, () => {
 ```
 
 Create `apps/api/.env.example`:
+
 ```bash
 PORT=4000
 WEB_ORIGIN=http://localhost:3000
 DATABASE_URL=
 DIRECT_URL=
 ```
+
 ```bash
 cp .env.example .env
 ```
 
 Verify build and runtime:
+
 ```bash
 pnpm dev
 # curl http://localhost:4000/health -> {"ok":true,...}
 ```
 
 Commit:
+
 ```bash
 git add .
 git commit -m "Scaffold Express API with decoupled server app"
 ```
 
 ---
+
+
 
 ## 5. Testing Framework Setup
 
@@ -196,11 +225,13 @@ Establish unit and integration test harnesses before writing business logic.
 ### API Testing: Vitest + Supertest
 
 From `apps/api`:
+
 ```bash
 pnpm add -D vitest supertest @types/supertest
 ```
 
 Add test script to `apps/api/package.json`:
+
 ```json
 "scripts": {
   "dev": "tsx watch src/server.ts",
@@ -212,6 +243,7 @@ Add test script to `apps/api/package.json`:
 ```
 
 Create `apps/api/vitest.config.ts`:
+
 ```typescript
 import { defineConfig } from "vitest/config";
 
@@ -225,6 +257,7 @@ export default defineConfig({
 ```
 
 Create first API integration test `apps/api/tests/health.test.ts`:
+
 ```typescript
 import { describe, it, expect } from "vitest";
 import request from "supertest";
@@ -241,18 +274,23 @@ describe("GET /health", () => {
 ```
 
 Run test:
+
 ```bash
 pnpm test
 ```
 
+
+
 ### Web Testing: Vitest + React Testing Library
 
 From `apps/web`:
+
 ```bash
 pnpm add -D vitest @vitejs/plugin-react jsdom @testing-library/react @testing-library/dom @testing-library/jest-dom
 ```
 
 Add test scripts to `apps/web/package.json`:
+
 ```json
 "scripts": {
   "dev": "next dev",
@@ -265,6 +303,7 @@ Add test scripts to `apps/web/package.json`:
 ```
 
 Create `apps/web/vitest.config.ts`:
+
 ```typescript
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
@@ -286,11 +325,13 @@ export default defineConfig({
 ```
 
 Create `apps/web/tests/setup.ts`:
+
 ```typescript
 import "@testing-library/jest-dom/vitest";
 ```
 
 Create smoke test `apps/web/tests/home.test.tsx`:
+
 ```typescript
 import { render, screen } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
@@ -305,16 +346,19 @@ describe("Home Page", () => {
 ```
 
 Run web test:
+
 ```bash
 pnpm test
 ```
 
 From monorepo root, run all workspace suites simultaneously:
+
 ```bash
 pnpm test
 ```
 
 Commit:
+
 ```bash
 git add .
 git commit -m "Configure Vitest test suites for web and api"
@@ -322,10 +366,16 @@ git commit -m "Configure Vitest test suites for web and api"
 
 ---
 
+
+
 ## 6. Database Provisioning & Prisma 7 Integration
 
+
+
 ### Configure Supabase Database Role
+
 Execute in Supabase Dashboard SQL Editor:
+
 ```sql
 -- Dedicated role for backend application operations
 create user "prisma" with password 'your_secure_password' bypassrls createdb;
@@ -343,18 +393,23 @@ alter default privileges for role postgres in schema public grant all on sequenc
 ```
 
 Collect Connection Strings:
-* **Session Pooler (Port 5432):** Direct connection for migrations (`DIRECT_URL`).
-* **Transaction Pooler (Port 6543):** Pooled connection for runtime application (`DATABASE_URL`). Must include `?pgbouncer=true`.
+
+- **Session Pooler (Port 5432):** Direct connection for migrations (`DIRECT_URL`).
+- **Transaction Pooler (Port 6543):** Pooled connection for runtime application (`DATABASE_URL`). Must include `?pgbouncer=true`.
 
 Update `apps/api/.env`:
+
 ```bash
 DATABASE_URL="postgres://prisma.[REF]:[PASSWORD]@aws-0-[REGION][.pooler.supabase.com:6543/postgres?pgbouncer=true](https://.pooler.supabase.com:6543/postgres?pgbouncer=true)"
 DIRECT_URL="postgres://prisma.[REF]:[PASSWORD]@aws-0-[REGION][.pooler.supabase.com:5432/postgres](https://.pooler.supabase.com:5432/postgres)"
 ```
 
+
+
 ### Install Prisma 7 Tooling
 
 From `apps/api`:
+
 ```bash
 pnpm add @prisma/client @prisma/adapter-pg pg
 pnpm add -D prisma @types/pg
@@ -362,6 +417,7 @@ pnpm exec prisma init
 ```
 
 Configure `apps/api/prisma.config.ts`:
+
 ```typescript
 import "dotenv/config";
 import { defineConfig, env } from "prisma/config";
@@ -378,6 +434,7 @@ export default defineConfig({
 ```
 
 Configure `apps/api/prisma/schema.prisma`:
+
 ```prisma
 generator client {
   provider = "prisma-client"
@@ -395,6 +452,7 @@ model HealthCheck {
 ```
 
 Instantiate the adapter client in `apps/api/src/db.ts`:
+
 ```typescript
 import { PrismaClient } from "../generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
@@ -409,12 +467,14 @@ export const prisma = new PrismaClient({ adapter });
 ```
 
 Run test migration:
+
 ```bash
 pnpm exec prisma migrate dev --name init_health
 pnpm exec prisma generate
 ```
 
 Commit:
+
 ```bash
 git add .
 git commit -m "Set up Prisma 7 with Postgres driver adapter"
@@ -422,13 +482,18 @@ git commit -m "Set up Prisma 7 with Postgres driver adapter"
 
 ---
 
+
+
 ## 7. Domain Modeling & Invariant Unit Tests
+
+
 
 ### Test Ledger Zero-Sum Math
 
 Before saving schemas or endpoints, write unit tests for the core calculation rules.
 
 Create `apps/api/tests/ledger.test.ts`:
+
 ```typescript
 import { describe, it, expect } from "vitest";
 
@@ -495,11 +560,15 @@ describe("Ledger Calculation & Invariants", () => {
 ```
 
 Verify tests:
+
 ```bash
 pnpm test
 ```
 
+
+
 ### Poker Ledger Prisma Schema
+
 Replace `apps/api/prisma/schema.prisma` with domain definitions:
 
 ```prisma
@@ -564,18 +633,22 @@ model BuyIn {
 ```
 
 Run domain migration:
+
 ```bash
 pnpm exec prisma migrate dev --name add_poker_ledger_schema
 pnpm exec prisma generate
 ```
 
 Commit:
+
 ```bash
 git add .
 git commit -m "Add domain schema and invariant tests for poker ledger"
 ```
 
 ---
+
+
 
 ## 8. Supabase Realtime CDC Activation
 
@@ -588,12 +661,14 @@ alter publication supabase_realtime add table session_players;
 ```
 
 In `apps/web`, install the client:
+
 ```bash
 cd apps/web
 pnpm add @supabase/supabase-js
 ```
 
 Create typed listener wrapper in `apps/web/src/lib/realtime.ts`:
+
 ```typescript
 import { createClient } from "@supabase/supabase-js";
 
@@ -628,13 +703,16 @@ export function subscribeToSession(
 
 ---
 
+
+
 ## 9. Containerization (`compose.yaml`)
 
 Run Docker Compose checks only after `pnpm test` and `pnpm dev` function cleanly across both applications.
 
 ### Dockerfiles
 
-**`apps/api/Dockerfile`**
+`apps/api/Dockerfile`
+
 ```dockerfile
 FROM node:22-alpine AS builder
 WORKDIR /app
@@ -657,7 +735,8 @@ EXPOSE 4000
 CMD ["node", "dist/server.js"]
 ```
 
-**`apps/web/Dockerfile`**
+`apps/web/Dockerfile`
+
 ```dockerfile
 FROM node:22-alpine AS builder
 WORKDIR /app
@@ -684,9 +763,10 @@ EXPOSE 3000
 CMD ["node", "server.js"]
 ```
 
-*(Note: Add `output: "standalone"` inside `apps/web/next.config.ts` to support the lightweight web runner).*
+*(Note: Add* `output: "standalone"` *inside* `apps/web/next.config.ts` *to support the lightweight web runner).*
 
 ### Root Orchestration
+
 Create `compose.yaml` in the monorepo root:
 
 ```yaml
@@ -713,6 +793,7 @@ services:
 ```
 
 Validate local container boot:
+
 ```bash
 docker compose up --build
 # Verify http://localhost:3000 and http://localhost:4000/health
@@ -720,6 +801,7 @@ docker compose down
 ```
 
 Commit:
+
 ```bash
 git add compose.yaml apps/api/Dockerfile apps/web/Dockerfile apps/web/next.config.ts
 git commit -m "Add Dockerfiles and Compose orchestration"
@@ -727,23 +809,32 @@ git commit -m "Add Dockerfiles and Compose orchestration"
 
 ---
 
+
+
 ## 10. AWS Deployment Workflow
 
+
+
 ### Target Architecture
+
 1. **Compute:** ECS Fargate tasks running `apps/web` and `apps/api` independently.
 2. **Traffic Management:** Application Load Balancer (ALB) routing:
-   * Rule 1: Path `/api/*` forwards to the `api` target group (Express).
-   * Default Rule: All other traffic forwards to the `web` target group (Next.js).
+  - Rule 1: Path `/api/*` forwards to the `api` target group (Express).
+  - Default Rule: All other traffic forwards to the `web` target group (Next.js).
 3. **Secrets Management:** `DATABASE_URL` and `DIRECT_URL` stored in AWS Systems Manager (SSM) Parameter Store or Secrets Manager, injected into ECS task definitions at startup.
 4. **Database:** Supabase-hosted PostgreSQL.
 
+
+
 ### Pre-Deployment Pipeline Checklist
+
 1. Monorepo tests pass: `pnpm test`.
 2. Static type checks pass: `pnpm --recursive run build`.
 3. Build container images targeting `linux/amd64` architecture:
-   ```bash
+  ```bash
    docker build --platform linux/amd64 -t [AWS_ACCOUNT_ID].dkr.ecr.[REGION][.amazonaws.com/poker-ledger-api:latest](https://.amazonaws.com/poker-ledger-api:latest) ./apps/api
    docker build --platform linux/amd64 -t [AWS_ACCOUNT_ID].dkr.ecr.[REGION][.amazonaws.com/poker-ledger-web:latest](https://.amazonaws.com/poker-ledger-web:latest) ./apps/web
-   ```
+  ```
 4. Authenticate Docker CLI to AWS ECR and push images.
 5. Trigger ECS service update to deploy revised task definitions.
+
