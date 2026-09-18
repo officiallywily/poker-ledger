@@ -1,0 +1,10 @@
+{
+    "name": "poker-ledger-monorepo",
+    "private": true,
+    "scripts": {
+      "dev": "pnpm --parallel run dev",
+      "build": "pnpm --recursive run build",
+      "test": "pnpm --recursive run test",
+      "test:watch": "pnpm --recursive run test:watch"
+    }
+  }
