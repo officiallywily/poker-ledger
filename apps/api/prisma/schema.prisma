@@ -1,8 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
@@ -14,5 +9,88 @@ datasource db {
 
 model HealthCheck {
   id        Int      @id @default(autoincrement())
-  createdAt DateTime @default(now())
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("health_checks")
+}
+
+enum SessionStatus {
+  active
+  closed
+  cancelled
+}
+
+enum PlayerStatus {
+  active
+  sitting_out
+  cashed_out
+}
+
+model GameSession {
+  id            String        @id @default(uuid()) @db.Uuid
+  joinCode      String        @unique @map("join_code") @db.VarChar(6)
+  hostUserId    String        @map("host_user_id") @db.Uuid
+  buyInCapCents Int?          @map("buy_in_cap_cents")
+  status        SessionStatus @default(active)
+  createdAt     DateTime      @default(now()) @map("created_at")
+  closedAt      DateTime?     @map("closed_at")
+
+  // Relations
+  host    User            @relation("HostSessions", fields: [hostUserId], references: [id], onDelete: Restrict)
+  players SessionPlayer[]
+
+  @@map("game_sessions")
+}
+
+model SessionPlayer {
+  id                 String       @id @default(uuid()) @db.Uuid
+  sessionId          String       @map("session_id") @db.Uuid
+  userId             String?      @map("user_id") @db.Uuid
+  guestName          String?      @map("guest_name")
+  status             PlayerStatus @default(active)
+  cashOutAmountCents Int?         @map("cash_out_amount_cents")
+  joinedAt           DateTime     @default(now()) @map("joined_at")
+  leftAt             DateTime?    @map("left_at")
+
+  // Relations
+  session GameSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  buyIns  BuyIn[]
+
+  @@index([sessionId, userId])
+  @@index([userId])
+  @@map("session_players")
+}
+
+model BuyIn {
+  id          String    @id @default(uuid()) @db.Uuid
+  playerId    String    @map("player_id") @db.Uuid
+  amountCents Int       @map("amount_cents")
+  boughtInAt  DateTime  @default(now()) @map("bought_in_at")
+  buyInNum    Int       @map("buy_in_num")
+  isVoided    Boolean   @default(false) @map("is_voided")
+  voidedAt    DateTime? @map("voided_at")
+
+  // Relations
+  player SessionPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@index([playerId])
+  @@map("buy_ins")
+}
+
+model User {
+  id          String    @id @db.Uuid
+  email       String    @unique
+  username    String    @unique @db.VarChar(30)
+  displayName String    @map("display_name")
+  avatarUrl   String?   @map("avatar_url")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  // Relations
+  hostedSessions GameSession[]   @relation("HostSessions")
+  sessionPlayers SessionPlayer[]
+
+  @@map("users")
 }
