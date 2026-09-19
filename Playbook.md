@@ -581,9 +581,17 @@ datasource db {
   provider = "postgresql"
 }
 
+model HealthCheck {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("health_checks")
+}
+
 enum SessionStatus {
   active
   closed
+  cancelled
 }
 
 enum PlayerStatus {
@@ -593,52 +601,141 @@ enum PlayerStatus {
 }
 
 model GameSession {
-  id              String          @id @default(uuid())
-  joinCode        String          @unique @db.VarChar(6)
-  hostUserId      String
-  buyInCapCents   Int?
-  status          SessionStatus   @default(active)
-  createdAt       DateTime        @default(now())
-  closedAt        DateTime?
-  players         SessionPlayer[]
+  id            String        @id @default(uuid()) @db.Uuid
+  joinCode      String        @unique @map("join_code") @db.VarChar(6)
+  hostUserId    String        @map("host_user_id") @db.Uuid
+  buyInCapCents Int?          @map("buy_in_cap_cents")
+  status        SessionStatus @default(active)
+  createdAt     DateTime      @default(now()) @map("created_at")
+  closedAt      DateTime?     @map("closed_at")
+
+  // Relations
+  host    User            @relation("HostSessions", fields: [hostUserId], references: [id], onDelete: Restrict)
+  players SessionPlayer[]
+
+  @@map("game_sessions")
 }
 
 model SessionPlayer {
-  id                 String       @id @default(uuid())
-  sessionId          String
-  userId             String?
-  guestName          String?
+  id                 String       @id @default(uuid()) @db.Uuid
+  sessionId          String       @map("session_id") @db.Uuid
+  userId             String?      @map("user_id") @db.Uuid
+  guestName          String?      @map("guest_name")
   status             PlayerStatus @default(active)
-  cashOutAmountCents Int?
-  joinedAt           DateTime     @default(now())
-  session            GameSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  buyIns             BuyIn[]
+  cashOutAmountCents Int?         @map("cash_out_amount_cents")
+  joinedAt           DateTime     @default(now()) @map("joined_at")
+  leftAt             DateTime?    @map("left_at")
 
-  @@unique([sessionId, userId])
-  @@index([sessionId])
+  // Relations
+  session GameSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  buyIns  BuyIn[]
+
+  @@index([sessionId, userId])
+  @@index([userId])
+  @@map("session_players")
 }
 
 model BuyIn {
-  id          String        @id @default(uuid())
-  playerId    String
-  amountCents Int
-  buyInNum    Int
-  isVoided    Boolean       @default(false)
-  voidedAt    DateTime?
-  boughtInAt  DateTime      @default(now())
-  player      SessionPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  id          String    @id @default(uuid()) @db.Uuid
+  playerId    String    @map("player_id") @db.Uuid
+  amountCents Int       @map("amount_cents")
+  boughtInAt  DateTime  @default(now()) @map("bought_in_at")
+  buyInNum    Int       @map("buy_in_num")
+  isVoided    Boolean   @default(false) @map("is_voided")
+  voidedAt    DateTime? @map("voided_at")
 
-  @@index([playerId])
+  // Relations
+  player SessionPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([playerId, buyInNum])
+  @@map("buy_ins")
 }
+
+model User {
+  id          String    @id @db.Uuid
+  email       String    @unique
+  username    String    @unique @db.VarChar(30)
+  displayName String    @map("display_name")
+  avatarUrl   String?   @map("avatar_url")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  // Relations
+  hostedSessions GameSession[]   @relation("HostSessions")
+  sessionPlayers SessionPlayer[]
+
+  @@map("users")
+}
+
 ```
 
-Run domain migration:
+Prisma `@@index([sessionId, userId])` only speeds lookups. One **active** seat per registered user (and per guest name) is a **partial unique index**. Leave/rejoin is a new `SessionPlayer` row with `left_at` set on the old row.
 
-```bash
-pnpm exec prisma migrate dev --name add_poker_ledger_schema
-pnpm exec prisma generate
-```
+### Adding Active Seat Partial Unique Indexes to Prisma Migrations
 
+Prisma does not support partial indexes (indexes with `WHERE` clauses) directly inside `schema.prisma`. To enforce at most one active seat per registered user or guest per session at the PostgreSQL level, apply them through a migration script using one of the two options below.
+
+---
+
+
+
+#### Option A: Include in Initial Schema Migration (Cleanest)
+
+Use this if you haven't applied `add_poker_ledger_schema` to the database yet.
+
+1. Generate the migration draft without executing it:
+  ```bash
+   pnpm exec prisma migrate dev --create-only --name add_poker_ledger_schema
+  ```
+2. Open the generated file at prisma/migrations/_add_poker_ledger_schema/migration.sql and append the following SQL to the bottom:
+  ```bash
+  -- At most one open seat per (session, user) for registered players.
+  -- Rejoin is allowed after left_at is set.
+  CREATE UNIQUE INDEX session_players_one_active_user
+  ON session_players (session_id, user_id)
+  WHERE left_at IS NULL AND user_id IS NOT NULL;
+
+  -- At most one open guest seat per (session, guest_name), case-insensitive.
+  CREATE UNIQUE INDEX session_players_one_active_guest 
+  ON session_players (session_id, LOWER(guest_name)) 
+  WHERE left_at IS NULL 
+    AND user_id IS NULL 
+    AND guest_name IS NOT NULL;
+  ```
+3. Apply the migration to your database and update the client:
+  ```bash
+  pnpm exec prisma migrate dev
+  pnpm exec prisma generate
+  ```
+
+#### Option B: Add as a Separate Migration
+Use this if add_poker_ledger_schema has already been run and applied.
+1. Generate an empty migration file:
+  ```bash
+  pnpm exec prisma migrate dev --create-only --name add_active_seat_partial_unique_indexes
+  ```
+2. Open the newly generated migration.sql file and paste:
+  ```bash
+  -- At most one open seat per (session, user) for registered players.
+  CREATE UNIQUE INDEX session_players_one_active_user
+  ON session_players (session_id, user_id)
+  WHERE left_at IS NULL AND user_id IS NOT NULL;
+
+  -- At most one open guest seat per (session, guest_name), case-insensitive.
+  CREATE UNIQUE INDEX session_players_one_active_guest 
+  ON session_players (session_id, LOWER(guest_name)) 
+  WHERE left_at IS NULL 
+    AND user_id IS NULL 
+    AND guest_name IS NOT NULL;
+  ```
+3. Run the migration
+  ```bash
+  pnpm exec prisma migrate dev
+  pnpm exec prisma generate
+  ```
+---
 Commit:
 
 ```bash
@@ -796,8 +893,14 @@ Validate local container boot:
 
 ```bash
 docker compose up --build
-# Verify http://localhost:3000 and http://localhost:4000/health
+```
+
+
+
+# Verify [http://localhost:3000](http://localhost:3000) and [http://localhost:4000/health](http://localhost:4000/health)
+
 docker compose down
+
 ```
 
 Commit:
@@ -809,11 +912,7 @@ git commit -m "Add Dockerfiles and Compose orchestration"
 
 ---
 
-
-
 ## 10. AWS Deployment Workflow
-
-
 
 ### Target Architecture
 
@@ -823,8 +922,6 @@ git commit -m "Add Dockerfiles and Compose orchestration"
   - Default Rule: All other traffic forwards to the `web` target group (Next.js).
 3. **Secrets Management:** `DATABASE_URL` and `DIRECT_URL` stored in AWS Systems Manager (SSM) Parameter Store or Secrets Manager, injected into ECS task definitions at startup.
 4. **Database:** Supabase-hosted PostgreSQL.
-
-
 
 ### Pre-Deployment Pipeline Checklist
 
