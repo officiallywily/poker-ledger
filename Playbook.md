@@ -638,6 +638,7 @@ model SessionPlayer {
 
 model BuyIn {
   id          String    @id @default(uuid()) @db.Uuid
+  sessionId   String    @map("session_id") @db.Uuid
   playerId    String    @map("player_id") @db.Uuid
   amountCents Int       @map("amount_cents")
   boughtInAt  DateTime  @default(now()) @map("bought_in_at")
@@ -646,9 +647,11 @@ model BuyIn {
   voidedAt    DateTime? @map("voided_at")
 
   // Relations
-  player SessionPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  session GameSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  player  SessionPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
 
   @@unique([playerId, buyInNum])
+  @@index([sessionId])
   @@map("buy_ins")
 }
 
@@ -710,14 +713,18 @@ Use this if you haven't applied `add_poker_ledger_schema` to the database yet.
   pnpm exec prisma generate
   ```
 
+
+
 #### Option B: Add as a Separate Migration
+
 Use this if add_poker_ledger_schema has already been run and applied.
+
 1. Generate an empty migration file:
   ```bash
   pnpm exec prisma migrate dev --create-only --name add_active_seat_partial_unique_indexes
   ```
 2. Open the newly generated migration.sql file and paste:
-  ```bash
+  ```sql
   -- At most one open seat per (session, user) for registered players.
   CREATE UNIQUE INDEX session_players_one_active_user
   ON session_players (session_id, user_id)
@@ -735,7 +742,9 @@ Use this if add_poker_ledger_schema has already been run and applied.
   pnpm exec prisma migrate dev
   pnpm exec prisma generate
   ```
+
 ---
+
 Commit:
 
 ```bash
@@ -753,8 +762,14 @@ Run in the Supabase SQL editor to allow client WebSocket subscriptions directly 
 
 ```sql
 -- Enable PostgreSQL logical replication publication for targeted ledger tables
-alter publication supabase_realtime add table buy_ins;
-alter publication supabase_realtime add table session_players;
+ALTER PUBLICATION supabase_realtime ADD TABLE game_sessions;
+ALTER PUBLICATION supabase_realtime ADD TABLE session_players;
+ALTER PUBLICATION supabase_realtime ADD TABLE buy_ins;
+
+-- Ensure full row state is broadcast on UPDATE/DELETE
+ALTER TABLE game_sessions REPLICA IDENTITY FULL;
+ALTER TABLE session_players REPLICA IDENTITY FULL;
+ALTER TABLE buy_ins REPLICA IDENTITY FULL;
 ```
 
 In `apps/web`, install the client:
@@ -775,27 +790,47 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 export function subscribeToSession(
-  sessionId: string,
-  onUpdate: () => void
-) {
-  const channel = supabase
-    .channel(`session-${sessionId}`)
-    .on(
-      "postgres_changes",
-      { event: "*", schema: "public", table: "buy_ins" },
-      () => onUpdate()
-    )
-    .on(
-      "postgres_changes",
-      { event: "*", schema: "public", table: "session_players" },
-      () => onUpdate()
-    )
-    .subscribe();
-
-  return () => {
-    supabase.removeChannel(channel);
-  };
-}
+    sessionId: string,
+    onUpdate: () => void
+  ) {
+    const channel = supabase
+      .channel(`session-${sessionId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "buy_ins",
+          filter: `session_id=eq.${sessionId}`,
+        },
+        () => onUpdate()
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "session_players",
+          filter: `session_id=eq.${sessionId}`,
+        },
+        () => onUpdate()
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "game_sessions",
+          filter: `id=eq.${sessionId}`,
+        },
+        () => onUpdate()
+      )
+      .subscribe();
+  
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }
 ```
 
 ---

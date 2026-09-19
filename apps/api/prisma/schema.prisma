@@ -64,6 +64,7 @@ model SessionPlayer {
 
 model BuyIn {
   id          String    @id @default(uuid()) @db.Uuid
+  sessionId   String    @map("session_id") @db.Uuid
   playerId    String    @map("player_id") @db.Uuid
   amountCents Int       @map("amount_cents")
   boughtInAt  DateTime  @default(now()) @map("bought_in_at")
@@ -72,9 +73,11 @@ model BuyIn {
   voidedAt    DateTime? @map("voided_at")
 
   // Relations
-  player SessionPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  session GameSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  player  SessionPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
 
-  @@index([playerId])
+  @@unique([playerId, buyInNum])
+  @@index([sessionId])
   @@map("buy_ins")
 }
 
