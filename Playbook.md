@@ -612,6 +612,7 @@ model GameSession {
   // Relations
   host    User            @relation("HostSessions", fields: [hostUserId], references: [id], onDelete: Restrict)
   players SessionPlayer[]
+  buyIns  BuyIn[]
 
   @@map("game_sessions")
 }
@@ -671,7 +672,6 @@ model User {
 
   @@map("users")
 }
-
 ```
 
 Prisma `@@index([sessionId, userId])` only speeds lookups. One **active** seat per registered user (and per guest name) is a **partial unique index**. Leave/rejoin is a new `SessionPlayer` row with `left_at` set on the old row.
@@ -802,7 +802,7 @@ export function subscribeToSession(
           schema: "public",
           table: "buy_ins",
           filter: `session_id=eq.${sessionId}`,
-        },
+        },t
         () => onUpdate()
       )
       .on(

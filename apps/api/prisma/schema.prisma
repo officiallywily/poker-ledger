@@ -38,6 +38,7 @@ model GameSession {
   // Relations
   host    User            @relation("HostSessions", fields: [hostUserId], references: [id], onDelete: Restrict)
   players SessionPlayer[]
+  buyIns  BuyIn[]
 
   @@map("game_sessions")
 }
