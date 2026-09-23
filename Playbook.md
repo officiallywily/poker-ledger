@@ -438,7 +438,7 @@ Configure `apps/api/prisma/schema.prisma`:
 ```prisma
 generator client {
   provider = "prisma-client"
-  output   = "../generated/prisma"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
@@ -454,7 +454,7 @@ model HealthCheck {
 Instantiate the adapter client in `apps/api/src/db.ts`:
 
 ```typescript
-import { PrismaClient } from "../generated/prisma/client.js";
+import { PrismaClient } from "./generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 
 const connectionString = process.env.DATABASE_URL;
@@ -574,7 +574,7 @@ Replace `apps/api/prisma/schema.prisma` with domain definitions:
 ```prisma
 generator client {
   provider = "prisma-client"
-  output   = "../generated/prisma"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
@@ -842,40 +842,52 @@ export function subscribeToSession(
 Run Docker Compose checks only after `pnpm test` and `pnpm dev` function cleanly across both applications.
 
 ### Dockerfiles
+pnpm’s lockfile lives at the monorepo root (`pnpm-lock.yaml`). Docker can only `COPY` files inside the build **context**, so both images use `context: .` (repo root) and `dockerfile: apps/<app>/Dockerfile`. Do not use `context: ./apps/web` or `./apps/api`.
+
+Pin Corepack to the same pnpm as `packageManager` in `apps/web/package.json` (not `pnpm@latest`). Use `--activate` as **one** flag (no space).
 
 `apps/api/Dockerfile`
 
 ```dockerfile
 FROM node:22-alpine AS builder
 WORKDIR /app
-RUN corepack enable && corepack prepare pnpm@latest --activate
-COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --frozen-lockfile
-COPY . .
+RUN corepack enable && corepack prepare pnpm@12.4.2 --activate
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY apps/api/package.json ./apps/api/
+COPY apps/web/package.json ./apps/web/
+RUN pnpm install --frozen-lockfile --filter api...
+COPY apps/api ./apps/api
+WORKDIR /app/apps/api
 RUN pnpm exec prisma generate
 RUN pnpm build
 
 FROM node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-RUN corepack enable && corepack prepare pnpm@latest --activate
-COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --prod --frozen-lockfile
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/generated ./generated
+RUN corepack enable && corepack prepare pnpm@12.4.2 --activate
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY apps/api/package.json ./apps/api/
+COPY apps/web/package.json ./apps/web/
+RUN pnpm install --prod --frozen-lockfile --filter api...
+COPY --from=builder /app/apps/api/dist ./dist
 EXPOSE 4000
 CMD ["node", "dist/server.js"]
 ```
 
 `apps/web/Dockerfile`
 
+The **builder** needs pnpm. The **runner** only executes `node server.js` (Next standalone); do not install pnpm there.
+
 ```dockerfile
 FROM node:22-alpine AS builder
 WORKDIR /app
-RUN corepack enable && corepack prepare pnpm@latest --activate
-COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --frozen-lockfile
-COPY . .
+RUN corepack enable && corepack prepare pnpm@12.4.2 --activate
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY apps/api/package.json ./apps/api/
+COPY apps/web/package.json ./apps/web/
+RUN pnpm install --frozen-lockfile --filter web...
+COPY apps/web ./apps/web
+WORKDIR /app/apps/web
 ARG NEXT_PUBLIC_API_URL
 ARG NEXT_PUBLIC_SUPABASE_URL
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
@@ -887,26 +899,25 @@ RUN pnpm build
 FROM node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-RUN corepack enable && corepack prepare pnpm@latest --activate
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/apps/web/public ./public
+COPY --from=builder /app/apps/web/.next/standalone ./
+COPY --from=builder /app/apps/web/.next/static ./.next/static
 EXPOSE 3000
-CMD ["node", "server.js"]
+CMD ["node", "apps/web/server.js"]
 ```
 
-*(Note: Add* `output: "standalone"` *inside* `apps/web/next.config.ts` *to support the lightweight web runner).*
+Next standalone from a nested app often emits `server.js` under `apps/web/` inside the standalone folder. If `CMD` fails, check the image (`docker compose run --rm web ls -la`) and point `CMD` at the actual `server.js`.
 
-### Root Orchestration
+In `apps/web/next.config.ts` set `output: "standalone"`.
 
-Create `compose.yaml` in the monorepo root:
+### Root orchestration
 
 ```yaml
 services:
   api:
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/api/Dockerfile
     ports:
       - "4000:4000"
     env_file:
@@ -914,28 +925,26 @@ services:
 
   web:
     build:
-      context: ./apps/web
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/web/Dockerfile
       args:
         NEXT_PUBLIC_API_URL: http://localhost:4000
+        NEXT_PUBLIC_SUPABASE_URL: https://your-ref.supabase.co
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: your-publishable-or-anon-key
     ports:
       - "3000:3000"
     depends_on:
       - api
 ```
 
-Validate local container boot:
-
 ```bash
 docker compose up --build
 ```
 
+Verify http://localhost:3000 and http://localhost:4000/health, then:
 
-
-# Verify [http://localhost:3000](http://localhost:3000) and [http://localhost:4000/health](http://localhost:4000/health)
-
+```bash
 docker compose down
-
 ```
 
 Commit:
