@@ -842,6 +842,7 @@ export function subscribeToSession(
 Run Docker Compose checks only after `pnpm test` and `pnpm dev` function cleanly across both applications.
 
 ### Dockerfiles
+
 pnpm’s lockfile lives at the monorepo root (`pnpm-lock.yaml`). Docker can only `COPY` files inside the build **context**, so both images use `context: .` (repo root) and `dockerfile: apps/<app>/Dockerfile`. Do not use `context: ./apps/web` or `./apps/api`.
 
 Pin Corepack to the same pnpm as `packageManager` in `apps/web/package.json` (not `pnpm@latest`). Use `--activate` as **one** flag (no space).
@@ -941,7 +942,7 @@ services:
 docker compose up --build
 ```
 
-Verify http://localhost:3000 and http://localhost:4000/health, then:
+Verify [http://localhost:3000](http://localhost:3000) and [http://localhost:4000/health](http://localhost:4000/health), then:
 
 ```bash
 docker compose down
@@ -956,26 +957,296 @@ git commit -m "Add Dockerfiles and Compose orchestration"
 
 ---
 
+
+
 ## 10. AWS Deployment Workflow
 
-### Target Architecture
+Skip until `docker compose up --build` works on your laptop (section 9) and `pnpm test` is green.
 
-1. **Compute:** ECS Fargate tasks running `apps/web` and `apps/api` independently.
-2. **Traffic Management:** Application Load Balancer (ALB) routing:
-  - Rule 1: Path `/api/*` forwards to the `api` target group (Express).
-  - Default Rule: All other traffic forwards to the `web` target group (Next.js).
-3. **Secrets Management:** `DATABASE_URL` and `DIRECT_URL` stored in AWS Systems Manager (SSM) Parameter Store or Secrets Manager, injected into ECS task definitions at startup.
-4. **Database:** Supabase-hosted PostgreSQL.
+This is a **one-box** workflow: the same `compose.yaml` as local, running on a single EC2 instance. Postgres stays on **Supabase**. Do not introduce ECS, ECR, or a load balancer for this stage.
 
-### Pre-Deployment Pipeline Checklist
+```text
+Laptop  --build linux/amd64 images-->  scp  -->  EC2
+                                                    |
+Browser --> EC2 public IP:3000 --> web container (Next standalone)
+        --> EC2 public IP:4000 --> api container (Express)
+                                        --> Supabase Postgres
+```
 
-1. Monorepo tests pass: `pnpm test`.
-2. Static type checks pass: `pnpm --recursive run build`.
-3. Build container images targeting `linux/amd64` architecture:
-  ```bash
-   docker build --platform linux/amd64 -t [AWS_ACCOUNT_ID].dkr.ecr.[REGION][.amazonaws.com/poker-ledger-api:latest](https://.amazonaws.com/poker-ledger-api:latest) ./apps/api
-   docker build --platform linux/amd64 -t [AWS_ACCOUNT_ID].dkr.ecr.[REGION][.amazonaws.com/poker-ledger-web:latest](https://.amazonaws.com/poker-ledger-web:latest) ./apps/web
-  ```
-4. Authenticate Docker CLI to AWS ECR and push images.
-5. Trigger ECS service update to deploy revised task definitions.
+`NEXT_PUBLIC_*` values are **baked into the web image at `docker compose build`**. The browser calls those URLs from the user's machine, so they must be the EC2 **public IP** (or later a domain), never `http://localhost:4000`. Changing the IP means rebuilding **web**.
 
+**EC2** = one Linux VM you SSH into. You install Docker, load images, run Compose. You stop the instance when you are not using it.
+
+**Do not** use this as a reason to run `docker compose build` on a `t3.micro`. `next build` on 1 GB RAM usually dies (OOM). Build on the laptop; copy images up.
+
+### Cost (read before launching)
+
+- **t3.micro** (1 vCPU, 1 GB): often Free Tier eligible for 12 months on a new account (750 hours/month). Confirm on the AWS Free Tier page for **your** account date.
+- Use **t3.micro** only if you **load pre-built images**. Use **t3.small** (2 GB) only if you insist on building **on** the instance (~on-demand pricing; check the current EC2 price list).
+- **Stop** vs **terminate:** Stop pauses most compute; the EBS volume can still cost a little. Terminate deletes the machine. An **Elastic IP** attached to a **stopped** instance can incur a small hourly charge; associate it only while you need a stable IP, or release it.
+- Create a **Billing alarm** before you launch anything (notify at $5 and $15).
+
+---
+
+### A. One-time: AWS account and VM
+
+Do this once. Daily work is section B.
+
+#### Account
+
+1. Create an account at aws.amazon.com (phone + credit card; AWS may authorize a small hold).
+2. As **root**, only: enable MFA, turn on billing emails, create a budget alarm. Do not use root for daily work.
+3. Create an IAM user (e.g. `will-admin`), console password, `AdministratorAccess` (too broad for a company; acceptable for a solo learning account), MFA. Sign in as that user.
+4. Pick **one region** and never mix (example: `us-west-2`). The console region selector is top-right.
+
+#### Security group
+
+EC2 → Security Groups → Create. Do **not** open 5432.
+
+| Type       | Port | Source                      | Why                          |
+| ---------- | ---- | --------------------------- | ---------------------------- |
+| SSH        | 22   | **My IP** (not `0.0.0.0/0`) | Only your laptop can SSH     |
+| Custom TCP | 3000 | `0.0.0.0/0`                 | Next.js in the browser       |
+| Custom TCP | 4000 | `0.0.0.0/0`                 | Express `/health` and API    |
+
+#### Key pair
+
+EC2 → Key pairs → Create → **ed25519** (or RSA). Download the `.pem` **once**.
+
+```bash
+chmod 400 ~/Downloads/poker-ledger-ec2.pem
+```
+
+Never commit this file.
+
+#### Launch
+
+EC2 → Launch instance:
+
+- Name: `poker-ledger`
+- AMI: Amazon Linux 2023
+- Architecture: **x86_64** if you follow the `linux/amd64` image steps below
+- Type: `t3.micro` (load images) or `t3.small` (build on box)
+- Key pair + security group from above
+- Auto-assign public IPv4: enable
+- Storage: 20 GB gp3
+
+Copy the **Public IPv4 address**. Examples below use `203.0.113.10` — replace it everywhere.
+
+Optional: **Elastic IP** → Allocate → Associate. Then the IP survives stop/start. Put **that** IP in `NEXT_PUBLIC_API_URL` and `WEB_ORIGIN`.
+
+#### SSH and Docker
+
+Amazon Linux 2023 user is `ec2-user`:
+
+```bash
+ssh -i ~/Downloads/poker-ledger-ec2.pem ec2-user@203.0.113.10
+```
+
+If it hangs: security group SSH is not **My IP**, VPN, or the instance is still booting.
+
+```bash
+sudo dnf update -y
+sudo dnf install -y docker git
+sudo systemctl enable --now docker
+sudo usermod -aG docker ec2-user
+```
+
+Log out and SSH back in. Then install the Compose plugin:
+
+```bash
+docker version
+sudo mkdir -p /usr/local/lib/docker/cli-plugins
+sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+docker compose version
+```
+
+Arm64 / `t4g` instances: use `docker-compose-linux-aarch64` and build `linux/arm64` images instead.
+
+#### Put the repo on the instance (code only, no secrets)
+
+**Git clone** (preferred once the repo is on GitHub):
+
+```bash
+git clone https://github.com/<you>/poker-ledger.git
+cd poker-ledger
+```
+
+**Or rsync from the laptop** (repo not remote yet). Run this on the **laptop**, not inside SSH:
+
+```bash
+rsync -avz \
+  --exclude node_modules --exclude .next --exclude dist \
+  --exclude .env --exclude .env.local --exclude apps/api/.env \
+  -e "ssh -i ~/Downloads/poker-ledger-ec2.pem" \
+  ./ ec2-user@203.0.113.10:~/poker-ledger
+```
+
+#### Env files on the server
+
+Compose reads **root** `.env` for web **build args**. The API reads **`apps/api/.env`** at **runtime**. Neither file belongs in git.
+
+On EC2, `~/poker-ledger/apps/api/.env`:
+
+```bash
+DATABASE_URL="postgres://...pooler...:6543/postgres?pgbouncer=true"
+DIRECT_URL="postgres://...:5432/postgres"
+PORT=4000
+WEB_ORIGIN="http://203.0.113.10:3000"
+```
+
+`WEB_ORIGIN` must match the URL in the browser or CORS blocks the frontend.
+
+On EC2, `~/poker-ledger/.env` (and the **same** values on the laptop when you build images for AWS):
+
+```bash
+NEXT_PUBLIC_API_URL=http://203.0.113.10:4000
+NEXT_PUBLIC_SUPABASE_URL=https://YOUR_REF.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-publishable-or-anon-key
+```
+
+`compose.yaml` already interpolates those into the web Dockerfile `ARG`s. Local laptop deploys can keep `http://localhost:4000` in root `.env`; AWS image builds must not.
+
+If Supabase has an IP allow-list, add the EC2 **public** IP.
+
+Optional systemd unit so Compose comes back after reboot:
+
+```bash
+sudo tee /etc/systemd/system/poker-ledger.service <<'EOF'
+[Unit]
+Description=poker-ledger compose
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/ec2-user/poker-ledger
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+User=ec2-user
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl enable --now poker-ledger.service
+```
+
+---
+
+### B. Recurring deploy loop (the actual workflow)
+
+Every code change follows the same path. Do **not** rebuild on `t3.micro`.
+
+#### 1. Local
+
+```bash
+pnpm test
+```
+
+Optional: `docker compose up --build` with **localhost** `NEXT_PUBLIC_*` to confirm Compose still works. Then `docker compose down`.
+
+#### 2. Point the web build at the public API
+
+On the **laptop**, set root `.env` to the EC2 URLs (section A) before building images destined for AWS. `apps/web/.env.local` is not used inside Docker.
+
+#### 3. Build `linux/amd64` images on the laptop
+
+From the repo root. Apple Silicon targeting an x86 `t3`:
+
+```bash
+export DOCKER_DEFAULT_PLATFORM=linux/amd64
+docker compose build
+docker images | grep poker-ledger
+docker save poker-ledger-api poker-ledger-web | gzip > /tmp/poker-ledger-images.tar.gz
+scp -i ~/Downloads/poker-ledger-ec2.pem /tmp/poker-ledger-images.tar.gz ec2-user@203.0.113.10:~/
+```
+
+Intel Mac or Linux → x86 EC2: omit `DOCKER_DEFAULT_PLATFORM`.
+
+If `docker save` cannot find those names, Compose tagged them differently. Use `docker images` and save the two `poker-ledger-*` tags you actually have (`{directory}-{service}` is the default).
+
+`prisma generate` during the API image build uses a dummy `DIRECT_URL` in the Dockerfile. It does not need a live database. Runtime still needs real `DATABASE_URL` in `apps/api/.env`.
+
+#### 4. Load and start on EC2
+
+```bash
+ssh -i ~/Downloads/poker-ledger-ec2.pem ec2-user@203.0.113.10
+cd ~/poker-ledger
+gunzip -c ~/poker-ledger-images.tar.gz | docker load
+docker compose up -d
+```
+
+No `--build` here. You want the images you just loaded.
+
+If you also changed Compose or env files, `git pull` or `rsync` the repo **before** `up -d`.
+
+#### 5. Smoke check from the laptop browser
+
+- `http://203.0.113.10:3000` — Next app
+- `http://203.0.113.10:4000/health` — `{"ok":true,...}`
+
+On EC2:
+
+```bash
+docker compose ps
+docker compose logs -f
+```
+
+| Symptom | Likely cause |
+| --- | --- |
+| Web loads, API calls fail | Stale `NEXT_PUBLIC_API_URL` (rebuild **web**), security group missing 4000, or `WEB_ORIGIN` mismatch |
+| `/health` fails | Missing `apps/api/.env` `DATABASE_URL`, or Supabase IP allow-list blocking EC2 |
+| `web` container exits immediately | Wrong standalone `CMD` path; `docker compose run --rm web ls -la` and confirm `apps/web/server.js` |
+| Build OOM on the instance | You ran `--build` on `t3.micro`; go back to laptop `docker save` |
+
+#### 6. What needs a rebuild vs a restart
+
+| Change | Action |
+| --- | --- |
+| API TypeScript / Prisma schema | Rebuild **api** image on laptop, `docker save`/`load`, `docker compose up -d` |
+| Web TypeScript or any `NEXT_PUBLIC_*` | Rebuild **web** image (public URL baked in) |
+| `apps/api/.env` only | No image rebuild. `docker compose up -d api --force-recreate` |
+| Root `.env` `NEXT_PUBLIC_*` | Rebuild **web**; restarting the old image does nothing |
+
+Schema changes still run **locally** (or from a trusted machine) with `pnpm exec prisma migrate deploy` against `DIRECT_URL`. Do not run migrations from a random container unless you intend to.
+
+#### Alternate: build on the instance
+
+Only with ≥ 2 GB RAM (`t3.small`):
+
+```bash
+cd ~/poker-ledger
+git pull
+docker compose up -d --build
+```
+
+Last-resort swap on `t3.micro` (slow):
+
+```bash
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+```
+
+---
+
+### C. Stop billing when you are done for the day
+
+```bash
+# on EC2
+docker compose down
+```
+
+Console: instance → **Stop**. Recheck Elastic IP charges if one is associated.
+
+---
+
+### D. Out of scope for this workflow
+
+- No HTTPS, custom domain, Nginx, load balancer, autoscaling, or zero-downtime.
+- Single instance is a single point of failure. Fine for a personal ledger.
+- Later: Nginx on 443 with Let's Encrypt, domain on the Elastic IP, then set `NEXT_PUBLIC_API_URL` and `WEB_ORIGIN` to `https://your.domain`. ECS + ALB is a different architecture when one VM is no longer enough.
